@@ -489,10 +489,20 @@ where writes are rare and correctness matters, this trade-off is acceptable.
   binary **built with `-race`**, so data races inside the server process are
   detected too.
 
-**Caveat.** With a single database connection, database access is serialized
-within the process. The test proves the conditional update is correct for this
-deployment. It does not, by itself, prove behavior with multiple connections or
-multiple processes; the statement-level design is what carries over to those.
+The E2E test runs several rounds per resource (each round races 20 writers
+on the current version), and a second test races updates against deletes of
+the same version: exactly one wins, and the losers get `412` if an update
+won or `404` if a delete won.
+
+**Caveat.** With a single database connection and transactions that take the
+write lock at `BEGIN`, database access is serialized within the process. The
+requests do interleave in the handlers, so the tests catch a version check
+and a write made in separate steps outside one transaction. But inside one
+transaction, even a check followed by an unconditional write would be safe
+here, so no black-box test can tell it apart. What carries over to multiple
+connections or processes (for example PostgreSQL under READ COMMITTED) is the
+check inside the `UPDATE`/`DELETE` statement itself, which code review and
+§6.2 guard, not these tests.
 
 ---
 

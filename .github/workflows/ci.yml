@@ -139,10 +139,21 @@ jobs:
             echo "the e2e suite did not run any tests"
             exit 1
           fi
+          # Every top-level test (not TestMain) must have run and passed.
+          # cat first: with several files, grep -c would print one count per
+          # file, and a non-number would make the comparison silently false.
+          expected=$(cat e2e/*_test.go | grep -cE '^func Test[A-Za-z0-9_]*\(t \*testing\.T\)' || true)
           passed=$(grep -c '^--- PASS' "$E2E_LOG" || true)
-          echo "e2e tests passed: $passed"
-          if [ "$status" -eq 0 ] && [ "$passed" -lt 7 ]; then
-            echo "expected at least 7 passing e2e tests"
+          echo "e2e tests passed: $passed of $expected"
+          case "$expected$passed" in
+            *[!0-9]*) echo "could not count the e2e tests"; exit 1 ;;
+          esac
+          if [ "$expected" -eq 0 ]; then
+            echo "found no e2e tests to expect"
+            exit 1
+          fi
+          if [ "$status" -eq 0 ] && [ "$passed" -ne "$expected" ]; then
+            echo "expected $expected passing e2e tests"
             exit 1
           fi
 

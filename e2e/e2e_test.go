@@ -20,6 +20,7 @@ import (
 	"reflect"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -445,4 +446,226 @@ func TestErrorContract(t *testing.T) {
 	p := expectProblem(t, call(t, "POST", "/api/v1/maintainers", `{"name":"","email":"Ada <a@example.com>"}`),
 		http.StatusUnprocessableEntity, "validation_failed")
 	expectFields(t, p, "name", "email")
+}
+
+// send is call for use from other goroutines: it reports errors instead of
+// calling t, which only the test goroutine may do.
+func send(method, path, body, ifMatch string) (response, error) {
+	req, err := http.NewRequest(method, baseURL+path, strings.NewReader(body))
+	if err != nil {
+		return response{}, err
+	}
+	if body != "" {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	req.Header.Set("If-Match", ifMatch)
+	resp, err := client.Do(req)
+	if err != nil {
+		return response{}, err
+	}
+	defer resp.Body.Close()
+	b, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return response{}, err
+	}
+	return response{status: resp.StatusCode, header: resp.Header, body: b}, nil
+}
+
+// sendConcurrently sends n requests released at the same moment and returns
+// the responses by index.
+func sendConcurrently(t *testing.T, n int, req func(i int) (response, error)) []response {
+	t.Helper()
+	responses := make([]response, n)
+	errs := make([]error, n)
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for i := range n {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			responses[i], errs[i] = req(i)
+		}()
+	}
+	close(start)
+	wg.Wait()
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("request %d: %v", i, err)
+		}
+	}
+	return responses
+}
+
+// TestConcurrentUpdatesHaveOneWinner is the concurrency test of DESIGN.md
+// §6.4: n clients that read the same version update at once. It runs several
+// rounds, because a race in a wrong implementation shows up only in some of
+// them. CI runs it against a server built with -race.
+func TestConcurrentUpdatesHaveOneWinner(t *testing.T) {
+	const n, rounds = 20, 5
+	m := createMaintainer(t)
+	a := createApplication(t, m.ID, "Valet")
+	resources := []struct {
+		name string
+		path string
+		body func(round, i int) string
+		// written returns the field that tells the writers apart.
+		written func(t *testing.T, r response) string
+	}{
+		{
+			name: "maintainer", path: "/api/v1/maintainers/" + m.ID,
+			body: func(round, i int) string {
+				return fmt.Sprintf(`{"name":"writer %d-%d","email":%q}`, round, i, m.Email)
+			},
+			written: func(t *testing.T, r response) string {
+				var got maintainer
+				r.json(t, &got)
+				return got.Name
+			},
+		},
+		{
+			name: "application", path: "/api/v1/applications/" + a.ID,
+			// Every other round sends the (unchanged) maintainerId, so the
+			// maintainerId condition of the UPDATE is raced too.
+			body: func(round, i int) string {
+				if round%2 == 0 {
+					return fmt.Sprintf(`{"maintainerId":%q,"title":"writer %d-%d","version":"1"}`, m.ID, round, i)
+				}
+				return fmt.Sprintf(`{"title":"writer %d-%d","version":"1"}`, round, i)
+			},
+			written: func(t *testing.T, r response) string {
+				var got application
+				r.json(t, &got)
+				return got.Title
+			},
+		},
+	}
+	for _, res := range resources {
+		t.Run(res.name, func(t *testing.T) {
+			for round := 1; round <= rounds; round++ {
+				current := fmt.Sprintf(`"%d"`, round)
+				responses := sendConcurrently(t, n, func(i int) (response, error) {
+					return send("PUT", res.path, res.body(round, i), current)
+				})
+
+				// 1. Exactly one 200; every other writer gets 412.
+				winner := -1
+				for i, r := range responses {
+					switch {
+					case r.status == http.StatusOK && winner == -1:
+						winner = i
+					case r.status == http.StatusOK:
+						t.Fatalf("round %d: writers %d and %d both got 200", round, winner, i)
+					case r.status != http.StatusPreconditionFailed:
+						t.Fatalf("round %d: writer %d got %d, want 412: %s", round, i, r.status, r.body)
+					default:
+						expectProblem(t, r, http.StatusPreconditionFailed, "version_mismatch")
+					}
+				}
+				if winner == -1 {
+					t.Fatalf("round %d: no writer got 200", round)
+				}
+
+				// 2 and 3. The version rose by exactly one, and the stored
+				// data is the winner's.
+				get := call(t, "GET", res.path, "")
+				if want := fmt.Sprintf(`"%d"`, round+1); get.header.Get("ETag") != want {
+					t.Fatalf("round %d: ETag = %q, want %s", round, get.header.Get("ETag"), want)
+				}
+				if got, want := res.written(t, get), fmt.Sprintf("writer %d-%d", round, winner); got != want {
+					t.Fatalf("round %d: stored %q, want the winner's %q", round, got, want)
+				}
+				if string(get.body) != string(responses[winner].body) {
+					t.Fatalf("round %d: GET body = %s, want the winner's response %s", round, get.body, responses[winner].body)
+				}
+
+				// 4. The version the losers sent stays stale.
+				expectProblem(t, call(t, "PUT", res.path, res.body(round, n), "If-Match", current),
+					http.StatusPreconditionFailed, "version_mismatch")
+			}
+		})
+	}
+}
+
+// TestConcurrentUpdateAndDelete races updates against deletes of the same
+// version. Exactly one wins. If a delete won, the resource is gone for
+// everyone else (404); if an update won, everyone else holds a stale
+// version (412).
+func TestConcurrentUpdateAndDelete(t *testing.T) {
+	const n = 20
+	m := createMaintainer(t)
+	a := createApplication(t, m.ID, "Valet")
+	path := "/api/v1/applications/" + a.ID
+
+	responses := sendConcurrently(t, n, func(i int) (response, error) {
+		if i%2 == 0 {
+			return send("PUT", path, fmt.Sprintf(`{"title":"writer %d","version":"1"}`, i), `"1"`)
+		}
+		return send("DELETE", path, "", `"1"`)
+	})
+
+	winner := -1
+	for i, r := range responses {
+		if r.status == http.StatusOK || r.status == http.StatusNoContent {
+			if winner != -1 {
+				t.Fatalf("requests %d and %d both succeeded", winner, i)
+			}
+			winner = i
+		}
+	}
+	if winner == -1 {
+		t.Fatal("no request succeeded")
+	}
+	deleteWon := responses[winner].status == http.StatusNoContent
+	for i, r := range responses {
+		switch {
+		case i == winner:
+		case deleteWon:
+			expectProblem(t, r, http.StatusNotFound, "not_found")
+		default:
+			expectProblem(t, r, http.StatusPreconditionFailed, "version_mismatch")
+		}
+	}
+
+	get := call(t, "GET", path, "")
+	if deleteWon {
+		expectProblem(t, get, http.StatusNotFound, "not_found")
+		return
+	}
+	var stored application
+	get.json(t, &stored)
+	if stored.ResourceVersion != 2 || stored.Title != fmt.Sprintf("writer %d", winner) {
+		t.Errorf("stored %+v, want version 2 and the winning update's title", stored)
+	}
+}
+
+// TestConcurrentDeletes: n clients delete the same version at once. One
+// succeeds; for the rest the resource is gone, which is a 404, not a 412
+// (DESIGN.md §6.2).
+func TestConcurrentDeletes(t *testing.T) {
+	const n = 20
+	m := createMaintainer(t)
+	a := createApplication(t, m.ID, "Valet")
+	for _, path := range []string{"/api/v1/applications/" + a.ID, "/api/v1/maintainers/" + m.ID} {
+		t.Run(path, func(t *testing.T) {
+			responses := sendConcurrently(t, n, func(int) (response, error) {
+				return send("DELETE", path, "", `"1"`)
+			})
+			deleted := 0
+			for i, r := range responses {
+				switch r.status {
+				case http.StatusNoContent:
+					deleted++
+				case http.StatusNotFound:
+					expectProblem(t, r, http.StatusNotFound, "not_found")
+				default:
+					t.Errorf("deleter %d: status %d, want 204 or 404: %s", i, r.status, r.body)
+				}
+			}
+			if deleted != 1 {
+				t.Errorf("%d deletes got 204, want exactly 1", deleted)
+			}
+			expectProblem(t, call(t, "GET", path, ""), http.StatusNotFound, "not_found")
+		})
+	}
 }
