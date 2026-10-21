@@ -154,6 +154,9 @@ All resource endpoints are under `/api/v1`. Bodies are JSON
 traffic should be routed elsewhere. It does not make it *not alive*: restarting
 the process would not fix the database. Keeping the database check out of
 `/livez` prevents a dependency outage from turning into a restart loop.
+A successful probe returns `200` with the plain-text body `ok`. A failed
+readiness check is an error response like any
+other: Problem Details with code `not_ready`.
 
 **Unmatched routes and methods.** Every error, including routing errors, uses
 the Problem Details format (§4.3). An unknown path returns `404`. A known path
@@ -182,7 +185,7 @@ so that client mistakes surface immediately instead of being silently ignored.
 | `422` | Well-formed request that fails field validation, references a missing Maintainer, or tries to change `maintainerId` |
 | `428` | `If-Match` missing on PUT or DELETE |
 | `500` | Unexpected internal error (details are logged, never returned) |
-| `503` | Request deadline exceeded or database temporarily busy |
+| `503` | Request deadline exceeded, database temporarily busy, or `/readyz` not ready (shutting down or database unreachable) |
 
 **400 vs 422.** `400` means the request could not be understood (syntax).
 `422` means it was understood but is not acceptable (semantics).
@@ -279,7 +282,7 @@ C toolchain on any platform.
 | `foreign_keys` | `ON` | Enforces A1–A3 in the database |
 | `busy_timeout` | 3000 ms | Waits for a file lock instead of failing immediately; kept below the 5 s request deadline (§7) so lock contention surfaces as `SQLITE_BUSY` → `503` rather than racing the deadline |
 | Max open connections | 1 | See D2 |
-| Database path | `DB_PATH` environment variable | Tests and CI use temporary files |
+| Database path | `DB_PATH` environment variable, default `metadata.db` in the working directory | Tests and CI use temporary files |
 
 Pragmas are set through the DSN (`_pragma=...`), so they apply to every
 connection the driver opens, not just the first one.
@@ -398,6 +401,31 @@ multiple processes; the statement-level design is what carries over to those.
 | Server timeouts | ReadHeader 5 s, Read 10 s, Write 15 s, Idle 60 s | Slow clients holding connections (e.g. Slowloris) |
 | Request deadline | 5 s per request, propagated via `context.Context` → `503` | Requests running unboundedly |
 | Graceful shutdown | On SIGINT/SIGTERM: `/readyz` returns `503`, stop accepting, drain in-flight requests (up to 10 s), then close the database | Dropped requests and an unclean database close during deploys |
+
+The listen address comes from the `ADDR` environment variable. It defaults to
+`127.0.0.1:8080`: the server has no authentication, so it listens only on
+loopback unless explicitly told otherwise (e.g. `ADDR=:8080` inside a container,
+where the published port decides who can reach it).
+
+**Shutdown order.** On the first SIGINT/SIGTERM, readiness is switched to `503`,
+then the listener is closed and in-flight requests are drained for up to 10 s.
+The database is closed only after that. If the drain finishes in time, no
+in-flight request loses its database.
+
+- There is no delay between switching readiness and closing the listener, so a
+  load balancer polling `/readyz` may not see the `503` before connections are
+  refused. A pre-stop delay (e.g. a Kubernetes `preStop` hook) covers that.
+- If the drain does not finish in time, the remaining connections are closed,
+  the database is closed, and the server exits with status 1. Closing the
+  database makes new database calls fail, but a handler that already holds the
+  connection keeps running until the process exits. It may still commit in
+  that time, even though its client already saw the connection close; a
+  transaction that has not committed when the process exits is never applied,
+  because SQLite ignores uncommitted WAL content when the database is next
+  opened.
+- If the server stops accepting connections on its own (a listener failure),
+  the open connections are closed before the database, and the server exits
+  with status 1.
 
 The request deadline works only because every storage call takes a
 `context.Context` and uses the `*Context` database methods. A deadline set by
