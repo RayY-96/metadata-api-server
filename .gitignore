@@ -1,0 +1,12 @@
+# Build output
+/bin/
+*.exe
+
+# SQLite database files (including WAL and shared-memory files)
+*.db
+*.db-wal
+*.db-shm
+
+# Test and coverage output
+coverage.out
+*.log

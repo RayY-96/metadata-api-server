@@ -155,6 +155,12 @@ traffic should be routed elsewhere. It does not make it *not alive*: restarting
 the process would not fix the database. Keeping the database check out of
 `/livez` prevents a dependency outage from turning into a restart loop.
 
+**Unmatched routes and methods.** Every error, including routing errors, uses
+the Problem Details format (§4.3). An unknown path returns `404`. A known path
+with an unsupported method returns `405` with an `Allow` header listing the
+supported methods. The standard library's plain-text defaults are never
+returned.
+
 Request bodies contain **only writable fields**. Unknown fields, including
 server-managed ones such as `id` or `resourceVersion`, are rejected with `400`
 so that client mistakes surface immediately instead of being silently ignored.
@@ -167,7 +173,8 @@ so that client mistakes surface immediately instead of being silently ignored.
 | `201` | Resource created |
 | `204` | Resource deleted |
 | `400` | Malformed JSON, unknown field, trailing data, bad query parameter, malformed `If-Match` |
-| `404` | Resource does not exist |
+| `404` | Resource does not exist, or unknown path |
+| `405` | Known path, unsupported method (`Allow` header lists supported methods) |
 | `409` | Duplicate email; deleting a Maintainer that still owns Applications |
 | `412` | `If-Match` does not match the current `resourceVersion` |
 | `413` | Request body larger than 64 KiB |
