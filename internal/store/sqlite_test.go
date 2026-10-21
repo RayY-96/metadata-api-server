@@ -10,11 +10,22 @@ import (
 
 func openTestStore(t *testing.T) *Store {
 	t.Helper()
-	s, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	return openTestStoreAt(t, filepath.Join(t.TempDir(), "test.db"))
+}
+
+// openTestStoreAt opens the store at path and closes it, checking the error,
+// when the test ends.
+func openTestStoreAt(t *testing.T, path string) *Store {
+	t.Helper()
+	s, err := Open(path)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	t.Cleanup(func() { s.Close() })
+	t.Cleanup(func() {
+		if err := s.Close(); err != nil {
+			t.Errorf("Close: %v", err)
+		}
+	})
 	return s
 }
 

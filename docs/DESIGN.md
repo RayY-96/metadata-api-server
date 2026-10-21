@@ -94,7 +94,9 @@ Server-managed fields are read-only for clients.
 
 - Every string field is trimmed of surrounding Unicode whitespace before it
   is validated and stored, so a whitespace-only required field is missing.
-- Lengths count Unicode characters (code points), not bytes.
+- Lengths count Unicode code points (Go's `utf8.RuneCountInString`), not
+  bytes and not user-perceived characters: `é` written as `e` plus a
+  combining accent counts as 2.
 - An email address is checked syntactically (RFC 5322 via Go's `net/mail`):
   the input must parse to exactly itself, so display names, angle brackets,
   comments and quoted local parts are rejected. The domain is not looked up,
@@ -103,7 +105,8 @@ Server-managed fields are read-only for clients.
   whether it refers to an existing Maintainer is decided by the foreign key
   (§4.6). On update an empty or whitespace-only `maintainerId` counts as
   omitted; a given one must equal the stored value after trimming, which is
-  checked with the constraint checks (§4.2 step 6).
+  checked with the constraint checks (§4.2 step 6). An update never writes
+  `maintainer_id`, so omitting it cannot clear or change the stored value.
 - Every invalid field is reported, in the order of the tables above.
 
 ### 3.2 Schema
@@ -136,6 +139,12 @@ CREATE TABLE applications (
 -- Serves both FK checks on maintainer delete and the ?maintainerId= filter.
 CREATE INDEX idx_applications_maintainer ON applications(maintainer_id);
 ```
+
+The schema is created at startup (`CREATE TABLE IF NOT EXISTS`); there are no
+migrations yet. Timestamps are stored as fixed-width UTC text with microsecond
+precision (`2026-10-20T10:00:00.000000Z`), so ordering by the column is
+chronological, and a created resource is returned with exactly the stored
+values.
 
 Validation happens in the application layer for good error messages. The
 `UNIQUE` and `FOREIGN KEY` constraints remain the final authority, so a race
@@ -338,6 +347,7 @@ C toolchain on any platform.
 | `foreign_keys` | `ON` | Enforces A1–A3 in the database |
 | `busy_timeout` | 3000 ms | Waits for a file lock instead of failing immediately; kept below the 5 s request deadline (§7) so lock contention surfaces as `SQLITE_BUSY` → `503` rather than racing the deadline |
 | Max open connections | 1 | See D2 |
+| Transaction mode | `_txlock=immediate` | Write transactions take the write lock at `BEGIN`, so a write cannot fail halfway with `SQLITE_BUSY_SNAPSHOT` |
 | Database path | `DB_PATH` environment variable, default `metadata.db` in the working directory | Tests and CI use temporary files |
 
 Pragmas are set through the DSN (`_pragma=...`), so they apply to every
@@ -347,7 +357,10 @@ connection the driver opens, not just the first one.
 process queue for the connection in `database/sql`'s pool, and that wait
 honors the request context. `busy_timeout` only matters when *another process*
 holds a lock on the same file (for example, a backup tool or a second server
-instance started by mistake).
+instance started by mistake). That wait does not end early when the request
+is cancelled or its deadline passes: the driver returns after `busy_timeout`,
+and the error is then classified by the context (§4.6). This is why
+`busy_timeout` stays below the request deadline.
 
 ### 5.3 Guarantees
 
