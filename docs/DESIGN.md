@@ -562,14 +562,16 @@ command needs no running server. They read the server address from `BASE_URL`.
 creates its own data with random emails and does not depend on pre-existing
 data or on test order.
 
-**CI pipeline** (GitHub Actions):
+**CI pipeline** (GitHub Actions, two jobs that run in parallel):
 
-1. `gofmt` check, `go vet`, build
+1. `gofmt` check, `go mod tidy -diff`, `go vet`, build
 2. Unit tests with `-race` and a coverage report in the job summary
-3. Build the server with `-race`, start it on a temporary database, and poll
+3. E2E job: `go vet -tags=e2e` (the unit job does not see the tagged files),
+   build the server with `-race`, start it on a temporary database, and poll
    `/readyz` until ready
 4. Run the E2E suite
-5. Send SIGTERM and verify the server exits cleanly; upload the server log on failure
+5. Send SIGTERM and verify the server exits with status 0, logged its
+   shutdown and reported no data race; upload the server log on failure
 
 ---
 

@@ -56,3 +56,131 @@ jobs:
             go tool cover -func=coverage.out
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+
+  e2e:
+    name: End-to-end tests against the server binary
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      ADDR: 127.0.0.1:8080
+      BASE_URL: http://127.0.0.1:8080
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      # The e2e files are excluded from the unit job by their build tag.
+      - name: Vet the e2e suite
+        run: go vet -tags=e2e ./...
+
+      # Built with -race, so data races inside the server process are found too
+      # (DESIGN.md §6.4).
+      - name: Build the server with the race detector
+        run: go build -race -o "$RUNNER_TEMP/server" ./cmd/server
+
+      # One step, so that the shell that starts the server can wait for it and
+      # read its exit status after SIGTERM.
+      - name: Start the server, run the e2e suite, shut down
+        # Below the job's timeout, so that a hang fails this step and the log
+        # is still uploaded.
+        timeout-minutes: 7
+        env:
+          DB_PATH: ${{ runner.temp }}/e2e.db
+        run: |
+          SERVER_LOG="$RUNNER_TEMP/server.log"
+          E2E_LOG="$RUNNER_TEMP/e2e.log"
+          pid=""
+
+          # Whatever happens below: stop the server, remove the database,
+          # and print the server log if the step fails.
+          cleanup() {
+            status=$?
+            if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+              kill -KILL "$pid" 2>/dev/null || true
+            fi
+            rm -f "$DB_PATH" "$DB_PATH-wal" "$DB_PATH-shm"
+            if [ "$status" -ne 0 ]; then
+              echo "::group::server log"
+              cat "$SERVER_LOG" || true
+              echo "::endgroup::"
+            fi
+          }
+          trap cleanup EXIT
+
+          "$RUNNER_TEMP/server" > "$SERVER_LOG" 2>&1 &
+          pid=$!
+
+          # Budgets: readiness 30 s + tests 4 min + shutdown 20 s stay below
+          # the step's 7 min, measured in elapsed time (bash SECONDS).
+          ready=false
+          deadline=$((SECONDS + 30))
+          while [ "$SECONDS" -lt "$deadline" ]; do
+            # The server must still be ours: a dead process means another
+            # one may be answering on the port.
+            kill -0 "$pid" || { echo "server exited during startup"; exit 1; }
+            if curl -fsS --max-time 2 "$BASE_URL/readyz" > /dev/null 2>&1; then ready=true; break; fi
+            sleep 0.5
+          done
+          if [ "$ready" != true ]; then
+            echo "server did not become ready within 30 s"
+            exit 1
+          fi
+
+          status=0
+          # The literal path ./e2e, not ./e2e/...: a pattern silently skips a
+          # package whose files are all excluded by build tags, a literal
+          # path fails.
+          go test -tags=e2e -count=1 -timeout=4m -v ./e2e 2>&1 | tee "$E2E_LOG" || status=$?
+
+          # Make sure the suite really ran.
+          if grep -qE "no test files|no tests to run" "$E2E_LOG"; then
+            echo "the e2e suite did not run any tests"
+            exit 1
+          fi
+          passed=$(grep -c '^--- PASS' "$E2E_LOG" || true)
+          echo "e2e tests passed: $passed"
+          if [ "$status" -eq 0 ] && [ "$passed" -lt 7 ]; then
+            echo "expected at least 7 passing e2e tests"
+            exit 1
+          fi
+
+          # Graceful shutdown: SIGTERM, then the server must exit 0 on its own
+          # within the 10 s drain. A data race is caught by the log check; it
+          # also turns a clean exit into status 66.
+          kill -TERM "$pid" || echo "the server had already exited"
+          for _ in $(seq 1 40); do # up to 20 s: the 10 s drain plus slack
+            kill -0 "$pid" 2>/dev/null || break
+            sleep 0.5
+          done
+          if kill -0 "$pid" 2>/dev/null; then
+            echo "the server did not exit within 20 s of SIGTERM"
+            exit 1 # cleanup kills it
+          fi
+          server_status=0
+          wait "$pid" || server_status=$?
+          pid=""
+          echo "server exit status: $server_status"
+
+          if grep -q "DATA RACE" "$SERVER_LOG"; then
+            echo "the race detector reported a data race in the server"
+            exit 1
+          fi
+          if ! grep -qE '^[0-9/: ]+shutting down$' "$SERVER_LOG"; then
+            echo "the server did not log its shutdown"
+            exit 1
+          fi
+          if [ "$server_status" -ne 0 ]; then
+            echo "the server did not exit cleanly"
+            exit 1
+          fi
+          exit "$status"
+
+      - name: Upload the server log
+        if: failure() || cancelled()
+        uses: actions/upload-artifact@v4
+        with:
+          name: server-log
+          path: ${{ runner.temp }}/server.log
+          if-no-files-found: ignore
