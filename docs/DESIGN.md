@@ -90,6 +90,22 @@ Server-managed fields are read-only for clients.
 | `description` | string | Optional, ≤ 4096 chars |
 | `resourceVersion`, `createdAt`, `updatedAt` | | As for Maintainer |
 
+**Validation rules** (details the tables leave open):
+
+- Every string field is trimmed of surrounding Unicode whitespace before it
+  is validated and stored, so a whitespace-only required field is missing.
+- Lengths count Unicode characters (code points), not bytes.
+- An email address is checked syntactically (RFC 5322 via Go's `net/mail`):
+  the input must parse to exactly itself, so display names, angle brackets,
+  comments and quoted local parts are rejected. The domain is not looked up,
+  so `a@localhost` is accepted.
+- `maintainerId` is required on create and only checked for presence;
+  whether it refers to an existing Maintainer is decided by the foreign key
+  (§4.6). On update an empty or whitespace-only `maintainerId` counts as
+  omitted; a given one must equal the stored value after trimming, which is
+  checked with the constraint checks (§4.2 step 6).
+- Every invalid field is reported, in the order of the tables above.
+
 ### 3.2 Schema
 
 ```sql
@@ -222,7 +238,7 @@ the same error:
 3. `422` — field validation (stateless)
 4. `404` — resource lookup
 5. `412` — version check
-6. `409` / `422` — constraint checks (duplicate email, missing or in-use Maintainer)
+6. `409` / `422` — constraint checks (duplicate email, missing or in-use Maintainer, changed `maintainerId`)
 
 ### 4.3 Error format
 
