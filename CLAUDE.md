@@ -112,7 +112,10 @@ This repository is public.
 
 ## Workflow
 
-Work one milestone (one commit) at a time.
+Work one milestone (one commit) at a time. There are two gates:
+
+- **Local gate** (steps 1–7): decides whether the change may be committed.
+- **Remote gate** (step 8): decides whether the pushed commit is verified in CI.
 
 1. **Before:** read the relevant DESIGN.md sections and the existing code; name
    the design decisions involved and the main correctness risks.
@@ -127,10 +130,21 @@ Work one milestone (one commit) at a time.
    ```
 4. **Review the diff** for correctness, scope creep, unintended changes,
    security issues and unnecessary complexity.
-5. **Report** using the format below. Do not hide failures.
-6. **Commit only after the human explicitly approves.** Conventional Commits
+5. **Independent review gate.** Run the `code-reviewer` subagent
+   (`.claude/agents/code-reviewer.md`) on the uncommitted change, stating the
+   milestone and its acceptance criteria. A `BLOCK`
+   verdict must be resolved (fixed, or shown to be a false positive with
+   evidence) and the reviewer re-run before asking for approval.
+6. **Report** using the format below, including the reviewer's verdict and how
+   each finding was handled. Do not hide failures.
+7. **Commit only after the human explicitly approves.** Conventional Commits
    (`feat:`, `fix:`, `test:`, `docs:`, `ci:`, `chore:`), one coherent working
    change per commit.
+8. **Push and verify CI** (once the repository has CI). Find the run for the
+   pushed commit (`gh run list --commit <sha>`) and confirm its conclusion and
+   job results. A green run for an earlier commit proves nothing about this
+   one. If CI fails, fix it through the local gate again and commit the fix as
+   a new commit; never rewrite the pushed history.
 
 ### Milestone report
 
@@ -139,8 +153,9 @@ Work one milestone (one commit) at a time.
 3. Go concepts introduced in this milestone, explained briefly (the human
    reviewer is new to Go).
 4. Checks and tests run, with their actual results.
-5. Deviations from DESIGN.md, limitations, and open risks.
-6. Proposed commit message.
+5. Reviewer gate verdict, and for each finding: fixed, or why it was rejected.
+6. Deviations from DESIGN.md, limitations, and open risks.
+7. Proposed commit message.
 
 Do not amend, squash, reset, force-push or otherwise rewrite commits unless
 explicitly asked.
