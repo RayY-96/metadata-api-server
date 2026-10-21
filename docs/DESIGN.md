@@ -734,3 +734,4 @@ Superseded decisions are kept and marked, not deleted.
 | Scale-out | Single instance | PostgreSQL, keyset pagination (§5.4) |
 | Overload | Per-request limits only; the number of concurrent connections and requests is not capped, so a flood of requests can still exhaust memory or file descriptors | Cap in-flight requests (load shedding with `503`), and rate limit at the gateway |
 | Observability | Logs only | Metrics (request rate, latency, `412` rate as a contention signal) |
+| Schema changes | Tables are created at startup; no migrations | Versioned migrations |
