@@ -1,11 +1,13 @@
 # metadata-api-server
 
+[![CI](https://github.com/RayY-96/metadata-api-server/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/RayY-96/metadata-api-server/actions/workflows/ci.yml)
+
 A RESTful metadata API for **Applications** and the **Maintainers** who create
 them, written in Go (standard library HTTP server) with SQLite storage.
 
 - **Highlight:** [optimistic concurrency](#highlight-optimistic-concurrency):
   concurrent writers can never silently overwrite each other.
-- **E2E pipeline:** a [successful run](https://github.com/RayY-96/metadata-api-server/actions/runs/39576540771)
+- **E2E pipeline:** a [successful run](https://github.com/RayY-96/metadata-api-server/actions/runs/39645553718)
   builds the server with the race detector, starts it, and runs the end-to-end
   suite against the real API ([all runs](https://github.com/RayY-96/metadata-api-server/actions)).
 - **Design document:** [docs/DESIGN.md](docs/DESIGN.md) has the full API
@@ -301,10 +303,10 @@ and `e2e/e2e_test.go` (`TestConcurrentUpdatesHaveOneWinner`).
 
 ## Cost
 
-About 5.5 hours in total (local time): from 21:20 on 2026-10-20 to about
+About 6 hours in total (local time): from 21:20 on 2026-10-20 to about
 02:30 the next morning for the design document, the implementation, the
-tests and CI (16 commits), and about half an hour from 10:00 that
-morning to finish this README.
+tests and CI (16 commits), and about 45 minutes from 10:00 that morning to
+finish this README and verify the final CI run.
 
 ## Anything else
 
