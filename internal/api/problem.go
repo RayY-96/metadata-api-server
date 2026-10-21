@@ -9,7 +9,13 @@ import (
 
 // Stable machine-readable error codes (DESIGN.md §4.3).
 const (
-	codeNotReady = "not_ready"
+	codeInvalidBody          = "invalid_body"
+	codeBodyTooLarge         = "body_too_large"
+	codeUnsupportedMediaType = "unsupported_media_type"
+	codeNotFound             = "not_found"
+	codeMethodNotAllowed     = "method_not_allowed"
+	codeNotReady             = "not_ready"
+	codeInternal             = "internal_error"
 )
 
 // problem is an RFC 9457 Problem Details body (DESIGN.md §4.3).

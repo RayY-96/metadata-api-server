@@ -162,11 +162,35 @@ other: Problem Details with code `not_ready`.
 the Problem Details format (§4.3). An unknown path returns `404`. A known path
 with an unsupported method returns `405` with an `Allow` header listing the
 supported methods. The standard library's plain-text defaults are never
-returned.
+returned. A path that is not in clean form (e.g. `/a/../livez`) is redirected
+with `307` to its clean form, as `net/http` does; that is not an error. The
+request target `*` matches nothing and returns `404`, except `OPTIONS *`,
+which `net/http` answers itself with an empty `200` before any handler runs
+(not an error response, so no plain-text body is sent).
 
 Request bodies contain **only writable fields**. Unknown fields, including
 server-managed ones such as `id` or `resourceVersion`, are rejected with `400`
 so that client mistakes surface immediately instead of being silently ignored.
+
+**Request body rules.** Implemented by one decoding function that every POST
+and PUT endpoint uses; the endpoints are added in later milestones.
+
+- `Content-Type` must be `application/json`. Parameters such as
+  `charset=utf-8` are ignored; the body is always parsed as UTF-8. A missing,
+  malformed or different media type (including `application/problem+json`
+  and `+json` suffixes) is `415`.
+- The body is buffered up to 64 KiB (65536 bytes) before it is parsed, so any
+  larger body is `413`, however malformed it is.
+- An empty body, malformed JSON, a value of the wrong type, a non-object
+  value, an unknown field, or anything but whitespace after the JSON value is
+  `400`.
+- A body that cannot be read completely (the connection broke, or the read
+  deadline fired while the client was still sending) is `400`. The response
+  is written even though the request context is cancelled (D9).
+- Standard `encoding/json` behavior is kept, as an assumption: field names
+  match case-insensitively (`{"NAME": ...}` sets `name`), for a duplicate key
+  the last value wins, invalid UTF-8 is replaced with U+FFFD, and a `null`
+  body decodes to empty fields, which are left to field validation.
 
 ### 4.2 Status codes
 
@@ -219,6 +243,22 @@ with `Content-Type: application/problem+json`, plus a stable machine-readable
 }
 ```
 
+`code` values are stable; clients may switch on them. `detail` is for humans
+and may change.
+
+| `code` | Status | Meaning |
+|---|---|---|
+| `invalid_body` | `400` | Body is empty, malformed, not an object, has a wrong-typed value, an unknown field or trailing data |
+| `not_found` | `404` | No route matches the path (resource lookups add their own rows) |
+| `method_not_allowed` | `405` | The path exists but not for this method; see `Allow` |
+| `body_too_large` | `413` | Body exceeds 64 KiB |
+| `unsupported_media_type` | `415` | `Content-Type` is not `application/json` |
+| `internal_error` | `500` | Unexpected server error; details are only logged |
+| `not_ready` | `503` | `/readyz`: shutting down or database unreachable |
+
+Codes for the resource endpoints (validation, version checks, constraints) are
+added to this table together with the endpoints.
+
 ### 4.4 Optimistic concurrency headers
 
 | Operation | Behavior |
@@ -258,7 +298,7 @@ on the operation:
 | Create Application | `SQLITE_CONSTRAINT_FOREIGNKEY` | `ErrMaintainerNotFound` | `422` |
 | Delete Maintainer | `SQLITE_CONSTRAINT_FOREIGNKEY` | `ErrMaintainerInUse` | `409` |
 | Any | `SQLITE_BUSY`, `context.DeadlineExceeded` | `ErrUnavailable` | `503` |
-| Any | `context.Canceled` (client disconnected) | returned as-is | none: the client is gone; logged as a client cancellation, not as a server error |
+| Any | `context.Canceled` (client disconnected or half-closed the connection) | returned as-is | an error response is still written, since the client may still be reading (D9); its status is defined with the resource endpoints. Logged as a client cancellation, not as a server error |
 | Any | anything else | wrapped internal error | `500` |
 
 Errors are classified by typed error code (`sqlite.Error.Code()`), never by
@@ -561,6 +601,25 @@ Superseded decisions are kept and marked, not deleted.
   Maintainer. Pre-checks alone are racy; the constraint is the final authority.
   See §4.6.
 - **Trade-off:** Each store method owns its error mapping (a little repetition).
+
+### D9. Always write a response, even when the request context is cancelled
+
+- **Status:** Accepted (2026-10-20). Supersedes the "none: the client is gone"
+  rule for `context.Canceled` in the first version of §4.6.
+- **Alternatives:** write nothing when the request context is cancelled; a
+  new `408 Request Timeout` for incomplete bodies
+- **Why:** A cancelled request context does not mean the client is gone.
+  `net/http` also cancels it when the read deadline fires or the client
+  half-closes the connection, and the client can still read the response. A
+  handler that writes nothing then sends `net/http`'s implicit `200` with an
+  empty body: a failed request looks successful, and `/readyz` looks ready.
+  This was found in review and is reproduced by a test that sends part of a
+  declared body and then either waits for the read deadline or half-closes
+  the connection. An incomplete body is the
+  client's fault, so the existing `400 invalid_body` is used instead of a new
+  status code.
+- **Trade-off:** A response is sometimes written to a client that is gone;
+  this costs nothing.
 
 ---
 
