@@ -234,7 +234,7 @@ and PUT endpoint uses; the endpoints are added in later milestones.
 | `422` | Well-formed request that fails field validation, references a missing Maintainer, or tries to change `maintainerId` |
 | `428` | `If-Match` missing on PUT or DELETE |
 | `500` | Unexpected internal error (details are logged, never returned) |
-| `503` | Request deadline exceeded, database temporarily busy, or `/readyz` not ready (shutting down or database unreachable) |
+| `503` | Request deadline exceeded, database temporarily busy, request canceled by the client, or `/readyz` not ready (shutting down or database unreachable) |
 
 **400 vs 422.** `400` means the request could not be understood (syntax).
 `422` means it was understood but is not acceptable (semantics).
@@ -258,7 +258,7 @@ with `Content-Type: application/problem+json`, plus a stable machine-readable
 ```json
 {
   "type": "about:blank",
-  "title": "Unprocessable Content",
+  "title": "Unprocessable Entity",
   "status": 422,
   "code": "validation_failed",
   "detail": "request body failed validation",
@@ -269,20 +269,30 @@ with `Content-Type: application/problem+json`, plus a stable machine-readable
 ```
 
 `code` values are stable; clients may switch on them. `detail` is for humans
-and may change.
+and may change. `title` is Go's standard text for the status
+(`http.StatusText`), e.g. `Unprocessable Entity` for `422` and
+`Request Entity Too Large` for `413`; tests pin each one.
 
 | `code` | Status | Meaning |
 |---|---|---|
 | `invalid_body` | `400` | Body is empty, malformed, not an object, has a wrong-typed value, an unknown field or trailing data |
-| `not_found` | `404` | No route matches the path (resource lookups add their own rows) |
+| `invalid_query` | `400` | `limit` or `offset` is not an integer in range, or is given twice |
+| `invalid_if_match` | `400` | `If-Match` is not a single strong ETag such as `"3"` |
+| `not_found` | `404` | No route matches the path, or the resource does not exist |
 | `method_not_allowed` | `405` | The path exists but not for this method; see `Allow` |
+| `email_taken` | `409` | Another Maintainer has this email |
+| `version_mismatch` | `412` | `If-Match` does not match the current `resourceVersion` |
 | `body_too_large` | `413` | Body exceeds 64 KiB |
 | `unsupported_media_type` | `415` | `Content-Type` is not `application/json` |
+| `validation_failed` | `422` | One or more fields are invalid; see `errors` |
+| `if_match_required` | `428` | `If-Match` is missing on PUT or DELETE |
 | `internal_error` | `500` | Unexpected server error; details are only logged |
+| `unavailable` | `503` | Database busy, request deadline exceeded, or request canceled by the client |
 | `not_ready` | `503` | `/readyz`: shutting down or database unreachable |
 
-Codes for the resource endpoints (validation, version checks, constraints) are
-added to this table together with the endpoints.
+`errors` is present only on `validation_failed`, listing every invalid field.
+Codes for Applications (missing or in-use Maintainer) are added with their
+endpoints.
 
 ### 4.4 Optimistic concurrency headers
 
@@ -296,14 +306,19 @@ added to this table together with the endpoints.
 
 `ETag` is the `resourceVersion` as a strong entity tag, e.g. `"3"`.
 `If-Match` must contain **exactly one strong entity tag holding a positive
-integer**. Weak tags (`W/"3"`), `*`, and lists of tags are rejected with `400`.
+integer**, written as the server writes it: `"3"`, no sign, no leading zeros.
+Weak tags (`W/"3"`), `*`, lists of tags, a repeated `If-Match` header and an
+empty value are rejected with `400`; surrounding whitespace is allowed.
 This keeps the parsing rules small and unambiguous; the trade-off is that
 generic HTTP clients relying on `If-Match: *` are not supported.
 
 ### 4.5 Pagination
 
 - Query parameters: `limit` (default 20, maximum 100) and `offset` (default 0).
-  Out-of-range or non-integer values return `400`; they are not silently clamped.
+  Values must be plain digits (no sign). Out-of-range or non-integer values,
+  and a parameter given twice, return `400`; they are not silently clamped.
+  Unknown query parameters are ignored; a malformed query string (a bad
+  `%` escape, a `;` separator) is `400`.
 - Results are ordered by `(created_at, id)` so pages are stable.
 - The server fetches `limit + 1` rows to compute `hasMore` without a `COUNT(*)`.
 
@@ -323,11 +338,24 @@ on the operation:
 | Create Application | `SQLITE_CONSTRAINT_FOREIGNKEY` | `ErrMaintainerNotFound` | `422` |
 | Delete Maintainer | `SQLITE_CONSTRAINT_FOREIGNKEY` | `ErrMaintainerInUse` | `409` |
 | Any | `SQLITE_BUSY`, `context.DeadlineExceeded` | `ErrUnavailable` | `503` |
-| Any | `context.Canceled` (client disconnected or half-closed the connection) | returned as-is | an error response is still written, since the client may still be reading (D9); its status is defined with the resource endpoints. Logged as a client cancellation, not as a server error |
+| Any | `context.Canceled` (client disconnected or half-closed the connection) | returned as-is | `503` (`unavailable`, "request was canceled"). The response is still written, since the client may still be reading (D9). Logged as a client cancellation, not as a server error |
 | Any | anything else | wrapped internal error | `500` |
 
 Errors are classified by typed error code (`sqlite.Error.Code()`), never by
 matching message strings. Internal details are logged and not returned to the client.
+The handler classifies a cancellation by the error the store returns, not by
+the request context alone, so a real database failure is never reported as a
+cancellation.
+
+**A `503` does not prove the write had no effect.** The server answers `503`
+only when the store reports an error, and a committed write is answered with
+success. But that success may never reach the client (the connection breaks,
+or a proxy in front times out and answers `503` itself), so a client cannot
+tell from a `503` or a missing response whether the write applied. Before
+retrying, it should read the resource (or, for POST, check whether it was
+created): a retried PUT or DELETE fails safely with `412` or `404` if the
+first attempt applied, but a retried POST can create a duplicate Application
+(§10).
 
 ---
 

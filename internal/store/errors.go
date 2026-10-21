@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log"
 
 	"modernc.org/sqlite"
 	sqlite3 "modernc.org/sqlite/lib"
@@ -64,8 +65,13 @@ func causedByContext(err error) bool {
 // successful Commit, Rollback returns sql.ErrTxDone, which is expected; any
 // other error is added to *err, because a failed rollback can leave the only
 // connection inside a transaction.
+//
+// The failure is also logged here, because a domain error such as
+// ErrVersionMismatch in *err still decides the response, and the handler does
+// not log those.
 func rollback(tx *sql.Tx, err *error) {
 	if rerr := tx.Rollback(); rerr != nil && !errors.Is(rerr, sql.ErrTxDone) {
+		log.Printf("rollback failed: %v", rerr)
 		*err = errors.Join(*err, fmt.Errorf("rollback: %w", rerr))
 	}
 }

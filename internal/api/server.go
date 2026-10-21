@@ -30,6 +30,12 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /livez", s.livez)
 	mux.HandleFunc("GET /readyz", s.readyz)
+
+	mux.HandleFunc("POST "+maintainersPath, s.createMaintainer)
+	mux.HandleFunc("GET "+maintainersPath, s.listMaintainers)
+	mux.HandleFunc("GET "+maintainersPath+"/{id}", s.getMaintainer)
+	mux.HandleFunc("PUT "+maintainersPath+"/{id}", s.updateMaintainer)
+	mux.HandleFunc("DELETE "+maintainersPath+"/{id}", s.deleteMaintainer)
 	return routeErrors(mux)
 }
 

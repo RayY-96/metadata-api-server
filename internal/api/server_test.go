@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"reflect"
 	"testing"
 
 	"github.com/RayY-96/metadata-api-server/internal/store"
@@ -108,8 +109,12 @@ var problemTitles = map[int]string{
 	400: "Bad Request",
 	404: "Not Found",
 	405: "Method Not Allowed",
+	409: "Conflict",
+	412: "Precondition Failed",
 	413: "Request Entity Too Large",
 	415: "Unsupported Media Type",
+	422: "Unprocessable Entity",
+	428: "Precondition Required",
 	500: "Internal Server Error",
 	503: "Service Unavailable",
 }
@@ -131,7 +136,7 @@ func assertProblem(t *testing.T, rec *httptest.ResponseRecorder, status int, cod
 		Code:   code,
 		Detail: detail,
 	}
-	if p != want {
+	if !reflect.DeepEqual(p, want) {
 		t.Errorf("problem = %+v, want %+v", p, want)
 	}
 }
