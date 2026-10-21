@@ -20,6 +20,7 @@ const (
 	codeNotFound             = "not_found"
 	codeMethodNotAllowed     = "method_not_allowed"
 	codeEmailTaken           = "email_taken"
+	codeMaintainerInUse      = "maintainer_in_use"
 	codeVersionMismatch      = "version_mismatch"
 	codeBodyTooLarge         = "body_too_large"
 	codeUnsupportedMediaType = "unsupported_media_type"
@@ -77,6 +78,9 @@ func writeStoreError(w http.ResponseWriter, r *http.Request, err error) {
 			"If-Match does not match the current resource version")
 	case errors.Is(err, store.ErrEmailTaken):
 		writeProblem(w, http.StatusConflict, codeEmailTaken, "email is already in use")
+	case errors.Is(err, store.ErrMaintainerInUse):
+		writeProblem(w, http.StatusConflict, codeMaintainerInUse,
+			"maintainer still owns applications; delete them first")
 	case errors.Is(err, context.Canceled):
 		// A client cancellation, not a server error. The response is still
 		// written: the client may still be reading (DESIGN.md D9).

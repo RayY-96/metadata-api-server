@@ -18,6 +18,16 @@ var (
 	ErrVersionMismatch = errors.New("resource version does not match")
 	ErrEmailTaken      = errors.New("email is already in use")
 	ErrUnavailable     = errors.New("database temporarily unavailable")
+
+	// ErrMaintainerNotFound: an Application refers to a Maintainer that does
+	// not exist (422). Not ErrNotFound, which means the requested resource
+	// itself is missing (404).
+	ErrMaintainerNotFound = errors.New("maintainer does not exist")
+	// ErrMaintainerInUse: a Maintainer still owns Applications (409).
+	ErrMaintainerInUse = errors.New("maintainer still owns applications")
+	// ErrMaintainerChanged: an update tried to change an Application's
+	// maintainerId, which is immutable (422).
+	ErrMaintainerChanged = errors.New("maintainerId cannot be changed")
 )
 
 // sqliteCode returns the extended result code of a SQLite error, or 0.

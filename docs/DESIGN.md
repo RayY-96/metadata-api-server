@@ -123,7 +123,7 @@ CREATE TABLE maintainers (
 
 CREATE TABLE applications (
     id               TEXT PRIMARY KEY,
-    maintainer_id    TEXT NOT NULL REFERENCES maintainers(id) ON DELETE RESTRICT,
+    maintainer_id    TEXT NOT NULL REFERENCES maintainers(id),  -- NO ACTION: blocks deletes (D10)
     title            TEXT NOT NULL,
     version          TEXT NOT NULL,
     company          TEXT NOT NULL DEFAULT '',
@@ -281,6 +281,7 @@ and may change. `title` is Go's standard text for the status
 | `not_found` | `404` | No route matches the path, or the resource does not exist |
 | `method_not_allowed` | `405` | The path exists but not for this method; see `Allow` |
 | `email_taken` | `409` | Another Maintainer has this email |
+| `maintainer_in_use` | `409` | The Maintainer still owns Applications; delete them first |
 | `version_mismatch` | `412` | `If-Match` does not match the current `resourceVersion` |
 | `body_too_large` | `413` | Body exceeds 64 KiB |
 | `unsupported_media_type` | `415` | `Content-Type` is not `application/json` |
@@ -291,8 +292,8 @@ and may change. `title` is Go's standard text for the status
 | `not_ready` | `503` | `/readyz`: shutting down or database unreachable |
 
 `errors` is present only on `validation_failed`, listing every invalid field.
-Codes for Applications (missing or in-use Maintainer) are added with their
-endpoints.
+Codes for the Application endpoints (missing or changed Maintainer) are added
+with those endpoints.
 
 ### 4.4 Optimistic concurrency headers
 
@@ -337,6 +338,7 @@ on the operation:
 | Create / update Maintainer | `SQLITE_CONSTRAINT_UNIQUE` on email | `ErrEmailTaken` | `409` |
 | Create Application | `SQLITE_CONSTRAINT_FOREIGNKEY` | `ErrMaintainerNotFound` | `422` |
 | Delete Maintainer | `SQLITE_CONSTRAINT_FOREIGNKEY` | `ErrMaintainerInUse` | `409` |
+| Update Application | none: the `UPDATE` requires an equal `maintainer_id` and matches no row | `ErrMaintainerChanged` (after 404 and 412 are ruled out in the same transaction) | `422` |
 | Any | `SQLITE_BUSY`, `context.DeadlineExceeded` | `ErrUnavailable` | `503` |
 | Any | `context.Canceled` (client disconnected or half-closed the connection) | returned as-is | `503` (`unavailable`, "request was canceled"). The response is still written, since the client may still be reading (D9). Logged as a client cancellation, not as a server error |
 | Any | anything else | wrapped internal error | `500` |
@@ -677,6 +679,21 @@ Superseded decisions are kept and marked, not deleted.
   status code.
 - **Trade-off:** A response is sometimes written to a client that is gone;
   this costs nothing.
+
+### D10. Foreign key without `ON DELETE RESTRICT`
+
+- **Status:** Accepted (2026-10-21). Changes the schema of §3.2, which declared
+  `ON DELETE RESTRICT`.
+- **Alternatives:** keep `RESTRICT` and classify its error code
+- **Why:** With `RESTRICT`, deleting a Maintainer who still owns Applications
+  fails with `SQLITE_CONSTRAINT_TRIGGER` (1811), not
+  `SQLITE_CONSTRAINT_FOREIGNKEY` (787) as §4.6 assumed; a real-SQLite test
+  found this. The default action (`NO ACTION`, checked at the end of each
+  statement because the constraint is not deferred) blocks the delete just the
+  same and reports 787, so §4.6 holds unchanged. Classifying 1811 instead
+  would tie `ErrMaintainerInUse` to a code that every trigger shares.
+- **Trade-off:** None in behavior. `RESTRICT` would differ only for deferred
+  constraints, which are not used.
 
 ---
 

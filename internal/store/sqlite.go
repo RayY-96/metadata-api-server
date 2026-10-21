@@ -4,6 +4,7 @@ package store
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -33,7 +34,36 @@ CREATE TABLE IF NOT EXISTS maintainers (
     resource_version INTEGER NOT NULL,
     created_at       TEXT NOT NULL,
     updated_at       TEXT NOT NULL
-);`
+);
+
+CREATE TABLE IF NOT EXISTS applications (
+    id               TEXT PRIMARY KEY,
+    -- No ON DELETE action: the default (NO ACTION, checked at the end of
+    -- each statement) blocks the delete and reports
+    -- SQLITE_CONSTRAINT_FOREIGNKEY; RESTRICT would report
+    -- SQLITE_CONSTRAINT_TRIGGER (DESIGN.md D10).
+    maintainer_id    TEXT NOT NULL REFERENCES maintainers(id),
+    title            TEXT NOT NULL,
+    version          TEXT NOT NULL,
+    company          TEXT NOT NULL DEFAULT '',
+    website          TEXT NOT NULL DEFAULT '',
+    source           TEXT NOT NULL DEFAULT '',
+    license          TEXT NOT NULL DEFAULT '',
+    description      TEXT NOT NULL DEFAULT '',
+    resource_version INTEGER NOT NULL,
+    created_at       TEXT NOT NULL,
+    updated_at       TEXT NOT NULL
+);
+
+-- Serves both FK checks on maintainer delete and the ?maintainerId= filter.
+CREATE INDEX IF NOT EXISTS idx_applications_maintainer ON applications(maintainer_id);`
+
+// timeLayout stores timestamps as fixed-width UTC text, so that ordering by
+// the TEXT column is chronological (DESIGN.md §4.5).
+const timeLayout = "2006-01-02T15:04:05.000000Z"
+
+// MaxPageSize is the largest page a list method returns (DESIGN.md §4.5).
+const MaxPageSize = 100
 
 // Store is the SQLite-backed storage layer.
 type Store struct {
@@ -82,6 +112,15 @@ func Open(path string) (*Store, error) {
 	if mode != "wal" {
 		return nil, closeOnError(db, fmt.Errorf("database %q does not support WAL (journal mode %q)", path, mode))
 	}
+	// Without foreign keys, a missing or in-use Maintainer would be accepted
+	// silently (DESIGN.md A1-A3), so check that they are enforced.
+	var foreignKeys int
+	if err := db.QueryRowContext(ctx, "PRAGMA foreign_keys").Scan(&foreignKeys); err != nil {
+		return nil, closeOnError(db, fmt.Errorf("read foreign_keys: %w", err))
+	}
+	if foreignKeys != 1 {
+		return nil, closeOnError(db, fmt.Errorf("foreign keys are not enforced on database %q", path))
+	}
 	if _, err := db.ExecContext(ctx, schema); err != nil {
 		return nil, closeOnError(db, fmt.Errorf("create schema: %w", err))
 	}
@@ -107,6 +146,42 @@ func closeOnError(db *sql.DB, err error) error {
 func dsn(path string) string {
 	q := url.Values{"_pragma": pragmas, "_txlock": {"immediate"}}
 	return path + "?" + q.Encode()
+}
+
+// timestamp returns the current time at the stored precision, so that the
+// value returned to the client equals the value read back later.
+func (s *Store) timestamp() time.Time {
+	return s.now().UTC().Truncate(time.Microsecond)
+}
+
+// newID returns a random (version 4) UUID.
+func newID() (string, error) {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", fmt.Errorf("generate id: %w", err)
+	}
+	b[6] = b[6]&0x0f | 0x40 // version 4
+	b[8] = b[8]&0x3f | 0x80 // RFC 4122 variant
+	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16]), nil
+}
+
+// scanner is implemented by *sql.Row and *sql.Rows.
+type scanner interface {
+	Scan(dest ...any) error
+}
+
+// parseTimestamps parses the stored created_at and updated_at of the
+// resource kind with the given id.
+func parseTimestamps(kind, id, created, updated string) (time.Time, time.Time, error) {
+	c, err := time.Parse(timeLayout, created)
+	if err != nil {
+		return time.Time{}, time.Time{}, fmt.Errorf("parse created_at of %s %s: %w", kind, id, err)
+	}
+	u, err := time.Parse(timeLayout, updated)
+	if err != nil {
+		return time.Time{}, time.Time{}, fmt.Errorf("parse updated_at of %s %s: %w", kind, id, err)
+	}
+	return c, u, nil
 }
 
 // Ping reports whether the database is reachable.

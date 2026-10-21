@@ -424,6 +424,25 @@ func TestDeleteMaintainerOrder(t *testing.T) {
 		http.StatusBadRequest, "invalid_if_match", `If-Match must be a single strong ETag such as "3"`)
 }
 
+// DESIGN.md A3: a Maintainer who still owns Applications cannot be deleted.
+// The Application is created through the store, as its endpoints come later.
+func TestDeleteMaintainerInUse(t *testing.T) {
+	st := openStore(t)
+	h := NewServer(st).Handler()
+	m := createMaintainer(t, h, "Ada", "ada@example.com")
+	_, err := st.CreateApplication(context.Background(),
+		model.ApplicationInput{MaintainerID: m.ID, Title: "Valet", Version: "1.0.0"})
+	if err != nil {
+		t.Fatalf("CreateApplication: %v", err)
+	}
+
+	rec := serve(t, h, request{method: "DELETE", path: "/api/v1/maintainers/" + m.ID, ifMatch: []string{`"1"`}})
+	assertProblem(t, rec, http.StatusConflict, "maintainer_in_use", "maintainer still owns applications; delete them first")
+	// A stale version is reported first (DESIGN.md §4.2).
+	rec = serve(t, h, request{method: "DELETE", path: "/api/v1/maintainers/" + m.ID, ifMatch: []string{`"2"`}})
+	assertProblem(t, rec, http.StatusPreconditionFailed, "version_mismatch", "If-Match does not match the current resource version")
+}
+
 func TestMaintainerRoutes(t *testing.T) {
 	h := newHandler(t)
 	tests := []struct {

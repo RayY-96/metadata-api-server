@@ -2,47 +2,16 @@ package store
 
 import (
 	"context"
-	"crypto/rand"
 	"database/sql"
 	"errors"
 	"fmt"
-	"time"
 
 	sqlite3 "modernc.org/sqlite/lib"
 
 	"github.com/RayY-96/metadata-api-server/internal/model"
 )
 
-// timeLayout stores timestamps as fixed-width UTC text, so that ordering by
-// the TEXT column is chronological (DESIGN.md §4.5).
-const timeLayout = "2006-01-02T15:04:05.000000Z"
-
 const maintainerColumns = "id, name, email, resource_version, created_at, updated_at"
-
-// MaxPageSize is the largest page ListMaintainers returns (DESIGN.md §4.5).
-const MaxPageSize = 100
-
-// timestamp returns the current time at the stored precision, so that the
-// value returned to the client equals the value read back later.
-func (s *Store) timestamp() time.Time {
-	return s.now().UTC().Truncate(time.Microsecond)
-}
-
-// newID returns a random (version 4) UUID.
-func newID() (string, error) {
-	var b [16]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		return "", fmt.Errorf("generate id: %w", err)
-	}
-	b[6] = b[6]&0x0f | 0x40 // version 4
-	b[8] = b[8]&0x3f | 0x80 // RFC 4122 variant
-	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16]), nil
-}
-
-// scanner is implemented by *sql.Row and *sql.Rows.
-type scanner interface {
-	Scan(dest ...any) error
-}
 
 func scanMaintainer(row scanner) (model.Maintainer, error) {
 	var m model.Maintainer
@@ -51,11 +20,9 @@ func scanMaintainer(row scanner) (model.Maintainer, error) {
 		return model.Maintainer{}, err
 	}
 	var err error
-	if m.CreatedAt, err = time.Parse(timeLayout, created); err != nil {
-		return model.Maintainer{}, fmt.Errorf("parse created_at of maintainer %s: %w", m.ID, err)
-	}
-	if m.UpdatedAt, err = time.Parse(timeLayout, updated); err != nil {
-		return model.Maintainer{}, fmt.Errorf("parse updated_at of maintainer %s: %w", m.ID, err)
+	m.CreatedAt, m.UpdatedAt, err = parseTimestamps("maintainer", m.ID, created, updated)
+	if err != nil {
+		return model.Maintainer{}, err
 	}
 	return m, nil
 }
@@ -155,7 +122,7 @@ func (s *Store) UpdateMaintainer(ctx context.Context, id string, version int64, 
 	case errors.Is(err, sql.ErrNoRows):
 		// No row matched: the Maintainer is missing or its version is stale.
 		// Ask in the same transaction, so the answer refers to the same state.
-		return model.Maintainer{}, fmt.Errorf("update maintainer: %w", missingOrStale(ctx, tx, id))
+		return model.Maintainer{}, fmt.Errorf("update maintainer: %w", missingOrStale(ctx, tx, maintainerExists, id))
 	case sqliteCode(err) == sqlite3.SQLITE_CONSTRAINT_UNIQUE:
 		return model.Maintainer{}, fmt.Errorf("update maintainer: %w: %w", ErrEmailTaken, err)
 	case err != nil:
@@ -168,8 +135,10 @@ func (s *Store) UpdateMaintainer(ctx context.Context, id string, version int64, 
 }
 
 // DeleteMaintainer deletes the Maintainer with the given id, but only if its
-// resource version still equals version. It returns ErrNotFound or
-// ErrVersionMismatch.
+// resource version still equals version. It returns ErrNotFound,
+// ErrVersionMismatch or, if Applications still refer to it,
+// ErrMaintainerInUse. A stale version matches no row, so it is reported
+// before the foreign key is checked (DESIGN.md §4.2).
 func (s *Store) DeleteMaintainer(ctx context.Context, id string, version int64) (err error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -179,6 +148,9 @@ func (s *Store) DeleteMaintainer(ctx context.Context, id string, version int64) 
 
 	res, err := tx.ExecContext(ctx, `DELETE FROM maintainers WHERE id = ? AND resource_version = ?`, id, version)
 	if err != nil {
+		if sqliteCode(err) == sqlite3.SQLITE_CONSTRAINT_FOREIGNKEY {
+			return fmt.Errorf("delete maintainer: %w: %w", ErrMaintainerInUse, err)
+		}
 		return wrap(ctx, "delete maintainer", err)
 	}
 	n, err := res.RowsAffected()
@@ -186,7 +158,7 @@ func (s *Store) DeleteMaintainer(ctx context.Context, id string, version int64) 
 		return wrap(ctx, "delete maintainer", err)
 	}
 	if n == 0 {
-		return fmt.Errorf("delete maintainer: %w", missingOrStale(ctx, tx, id))
+		return fmt.Errorf("delete maintainer: %w", missingOrStale(ctx, tx, maintainerExists, id))
 	}
 	if err := tx.Commit(); err != nil {
 		return wrap(ctx, "delete maintainer", err)
@@ -194,14 +166,17 @@ func (s *Store) DeleteMaintainer(ctx context.Context, id string, version int64) 
 	return nil
 }
 
+const maintainerExists = `SELECT EXISTS (SELECT 1 FROM maintainers WHERE id = ?)`
+
 // missingOrStale explains why a conditional write matched no row: it returns
-// ErrNotFound if the Maintainer does not exist, else ErrVersionMismatch.
-func missingOrStale(ctx context.Context, tx *sql.Tx, id string) error {
+// ErrNotFound if existsQuery (a constant EXISTS query on one table) finds no
+// row with the id, else ErrVersionMismatch.
+func missingOrStale(ctx context.Context, tx *sql.Tx, existsQuery, id string) error {
 	var exists bool
-	err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM maintainers WHERE id = ?)`, id).Scan(&exists)
+	err := tx.QueryRowContext(ctx, existsQuery, id).Scan(&exists)
 	switch {
 	case err != nil:
-		return wrap(ctx, "check maintainer exists", err)
+		return wrap(ctx, "check resource exists", err)
 	case !exists:
 		return ErrNotFound
 	default:
