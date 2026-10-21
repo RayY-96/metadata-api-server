@@ -3,6 +3,7 @@ package api
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"io"
@@ -10,7 +11,9 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/RayY-96/metadata-api-server/internal/store"
 )
@@ -215,4 +218,97 @@ func TestReadyzCanceledRequestIsNotReady(t *testing.T) {
 	NewServer(openStore(t)).Handler().ServeHTTP(rec, req)
 
 	assertProblem(t, rec, http.StatusServiceUnavailable, "not_ready", "request was canceled")
+}
+
+func TestRequestDeadline(t *testing.T) {
+	if got := NewServer(openStore(t)).timeout; got != 5*time.Second {
+		t.Errorf("NewServer timeout = %v, want 5s (DESIGN.md §7)", got)
+	}
+
+	t.Run("every request gets the deadline", func(t *testing.T) {
+		var deadline time.Time
+		var ok bool
+		h := withDeadline(5*time.Second, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			deadline, ok = r.Context().Deadline()
+		}))
+		before := time.Now()
+		h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/", nil))
+		if !ok || deadline.Before(before) || deadline.After(time.Now().Add(5*time.Second)) {
+			t.Errorf("deadline = %v (set %v), want within 5s of the request", deadline, ok)
+		}
+	})
+
+	// An already expired deadline makes the outcome independent of timing.
+	expired := func(t *testing.T) http.Handler {
+		s := NewServer(openStore(t))
+		s.timeout = -time.Second
+		return s.Handler()
+	}
+	t.Run("expired deadline is 503", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		expired(t).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/maintainers", nil))
+		assertProblem(t, rec, http.StatusServiceUnavailable, "unavailable", "request deadline exceeded")
+	})
+	t.Run("expired deadline on readyz is not a cancellation", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		expired(t).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+		assertProblem(t, rec, http.StatusServiceUnavailable, "not_ready", "database did not answer in time")
+	})
+	t.Run("livez needs no time", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		expired(t).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/livez", nil))
+		if rec.Code != http.StatusOK {
+			t.Errorf("livez = %d, want 200", rec.Code)
+		}
+	})
+}
+
+// TestDeadlineWhileWaiting lets the deadline expire while the driver waits for
+// a write lock that another connection holds, as a backup tool or a second
+// process could. The driver returns after busy_timeout (3 s); the response
+// names the deadline, which expired first, not a busy database.
+func TestDeadlineWhileWaiting(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "test.db")
+	st, err := store.Open(path)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := st.Close(); err != nil {
+			t.Errorf("close store: %v", err)
+		}
+	})
+	s := NewServer(st)
+	s.timeout = 100 * time.Millisecond
+
+	ctx := context.Background()
+	locker, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open locker: %v", err)
+	}
+	conn, err := locker.Conn(ctx)
+	if err != nil {
+		t.Fatalf("locker conn: %v", err)
+	}
+	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
+		t.Fatalf("lock: %v", err)
+	}
+	t.Cleanup(func() {
+		if _, err := conn.ExecContext(ctx, "ROLLBACK"); err != nil {
+			t.Errorf("unlock: %v", err)
+		}
+		if err := conn.Close(); err != nil {
+			t.Errorf("close locker conn: %v", err)
+		}
+		if err := locker.Close(); err != nil {
+			t.Errorf("close locker: %v", err)
+		}
+	})
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/maintainers", strings.NewReader(`{"name":"Ada","email":"ada@example.com"}`))
+	req.Header.Set("Content-Type", "application/json")
+	s.Handler().ServeHTTP(rec, req)
+	assertProblem(t, rec, http.StatusServiceUnavailable, "unavailable", "request deadline exceeded")
 }

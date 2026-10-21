@@ -186,7 +186,10 @@ func parseTimestamps(kind, id, created, updated string) (time.Time, time.Time, e
 
 // Ping reports whether the database is reachable.
 func (s *Store) Ping(ctx context.Context) error {
-	return s.db.PingContext(ctx)
+	if err := s.db.PingContext(ctx); err != nil {
+		return wrap(ctx, "ping", err)
+	}
+	return nil
 }
 
 // Close closes the database. It must be called only after all requests that

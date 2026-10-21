@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -45,7 +46,9 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, dst any) bool {
 				fmt.Sprintf("request body must not exceed %d bytes", maxBodyBytes))
 			return false
 		}
-		if r.Context().Err() != nil {
+		// Only a cancellation is the client's doing; an expired request
+		// deadline is logged as a plain read error.
+		if errors.Is(r.Context().Err(), context.Canceled) {
 			log.Printf("read request body: request canceled: %v", err)
 		} else {
 			log.Printf("read request body: %v", err)

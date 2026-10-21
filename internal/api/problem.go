@@ -99,6 +99,12 @@ func writeStoreError(w http.ResponseWriter, r *http.Request, err error) {
 		// written: the client may still be reading (DESIGN.md D9).
 		log.Printf("%s %q: request canceled: %v", r.Method, r.URL.Path, err)
 		writeProblem(w, http.StatusServiceUnavailable, codeUnavailable, "request was canceled")
+	case errors.Is(err, context.DeadlineExceeded):
+		// The request ran out of its time budget (DESIGN.md §7). This also
+		// happens when a slow body upload used it up before the database was
+		// ever asked, so the database is not blamed.
+		log.Printf("%s %q: request deadline exceeded: %v", r.Method, r.URL.Path, err)
+		writeProblem(w, http.StatusServiceUnavailable, codeUnavailable, "request deadline exceeded")
 	case errors.Is(err, store.ErrUnavailable):
 		log.Printf("%s %q: %v", r.Method, r.URL.Path, err)
 		writeProblem(w, http.StatusServiceUnavailable, codeUnavailable, "database temporarily unavailable")

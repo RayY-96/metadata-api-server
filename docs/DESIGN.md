@@ -542,7 +542,15 @@ bypass the Problem Details format.
 Cancellation is **cooperative**: the deadline stops work at the next point that
 checks the context (waiting for the connection, executing a statement). It
 does not forcibly interrupt arbitrary code. The context is the total time
-budget for the request; no lower layer may extend it.
+budget for the request's handler and database work; no lower layer may
+extend it. It is not a hard bound on response time: a wait for another
+process's lock ends only after `busy_timeout` (§5.2), and reading the request
+body does not check the context (it is bounded by the server's `ReadTimeout`,
+10 s). When the budget is used up, the response is `503` `unavailable` with
+the detail "request deadline exceeded", also when a slow upload used it up
+before the database was asked. `/readyz` pings with the same budget and
+reports "database did not answer in time"; it shares the single connection
+with traffic.
 
 ---
 

@@ -498,7 +498,7 @@ func TestStoreFailures(t *testing.T) {
 	t.Run("deadline exceeded", func(t *testing.T) {
 		rec := serve(t, newHandler(t), request{method: "POST", path: "/api/v1/maintainers", ctx: expired,
 			body: `{"name":"Ada","email":"ada@example.com"}`})
-		assertProblem(t, rec, http.StatusServiceUnavailable, "unavailable", "database temporarily unavailable")
+		assertProblem(t, rec, http.StatusServiceUnavailable, "unavailable", "request deadline exceeded")
 	})
 	t.Run("unexpected error", func(t *testing.T) {
 		st := openStore(t)
