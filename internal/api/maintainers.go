@@ -41,7 +41,7 @@ func (s *Server) createMaintainer(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) listMaintainers(w http.ResponseWriter, r *http.Request) {
-	limit, offset, ok := parsePage(w, r)
+	_, limit, offset, ok := parsePage(w, r)
 	if !ok {
 		return
 	}

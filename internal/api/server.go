@@ -36,6 +36,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET "+maintainersPath+"/{id}", s.getMaintainer)
 	mux.HandleFunc("PUT "+maintainersPath+"/{id}", s.updateMaintainer)
 	mux.HandleFunc("DELETE "+maintainersPath+"/{id}", s.deleteMaintainer)
+
+	mux.HandleFunc("POST "+applicationsPath, s.createApplication)
+	mux.HandleFunc("GET "+applicationsPath, s.listApplications)
+	mux.HandleFunc("GET "+applicationsPath+"/{id}", s.getApplication)
+	mux.HandleFunc("PUT "+applicationsPath+"/{id}", s.updateApplication)
+	mux.HandleFunc("DELETE "+applicationsPath+"/{id}", s.deleteApplication)
 	return routeErrors(mux)
 }
 

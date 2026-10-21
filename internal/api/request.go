@@ -61,27 +61,28 @@ func isDigits(s string) bool {
 	return true
 }
 
-// parsePage reads the limit and offset query parameters (DESIGN.md §4.5).
-// Values out of range are rejected, not clamped. On failure it writes the
-// response and returns false.
-func parsePage(w http.ResponseWriter, r *http.Request) (limit, offset int, ok bool) {
+// parsePage parses the query string and reads the limit and offset
+// parameters (DESIGN.md §4.5); it returns the parsed query for any other
+// parameters. Values out of range are rejected, not clamped. On failure it
+// writes the response and returns false.
+func parsePage(w http.ResponseWriter, r *http.Request) (q url.Values, limit, offset int, ok bool) {
 	// r.URL.Query() silently drops pairs it cannot parse (bad escapes, ';'),
 	// which would turn "limit=%zz" into the default; reject them instead.
 	q, err := url.ParseQuery(r.URL.RawQuery)
 	if err != nil {
 		writeProblem(w, http.StatusBadRequest, codeInvalidQuery, "query string is malformed")
-		return 0, 0, false
+		return nil, 0, 0, false
 	}
 	limit, ok = intParam(w, q["limit"], defaultPageSize, 1, store.MaxPageSize,
 		"limit must be an integer from 1 to "+strconv.Itoa(store.MaxPageSize))
 	if !ok {
-		return 0, 0, false
+		return nil, 0, 0, false
 	}
 	offset, ok = intParam(w, q["offset"], 0, 0, math.MaxInt, "offset must be a non-negative integer")
 	if !ok {
-		return 0, 0, false
+		return nil, 0, 0, false
 	}
-	return limit, offset, true
+	return q, limit, offset, true
 }
 
 // intParam parses an optional query parameter given at most once, written as

@@ -197,8 +197,8 @@ Request bodies contain **only writable fields**. Unknown fields, including
 server-managed ones such as `id` or `resourceVersion`, are rejected with `400`
 so that client mistakes surface immediately instead of being silently ignored.
 
-**Request body rules.** Implemented by one decoding function that every POST
-and PUT endpoint uses; the endpoints are added in later milestones.
+**Request body rules.** Every POST and PUT endpoint decodes its body with the
+same function, so these rules hold for both resources.
 
 - `Content-Type` must be `application/json`. Parameters such as
   `charset=utf-8` are ignored; the body is always parsed as UTF-8. A missing,
@@ -276,7 +276,7 @@ and may change. `title` is Go's standard text for the status
 | `code` | Status | Meaning |
 |---|---|---|
 | `invalid_body` | `400` | Body is empty, malformed, not an object, has a wrong-typed value, an unknown field or trailing data |
-| `invalid_query` | `400` | `limit` or `offset` is not an integer in range, or is given twice |
+| `invalid_query` | `400` | `limit` or `offset` is not an integer in range, `maintainerId` is empty, one of these three is given twice, or the query string is malformed |
 | `invalid_if_match` | `400` | `If-Match` is not a single strong ETag such as `"3"` |
 | `not_found` | `404` | No route matches the path, or the resource does not exist |
 | `method_not_allowed` | `405` | The path exists but not for this method; see `Allow` |
@@ -286,14 +286,17 @@ and may change. `title` is Go's standard text for the status
 | `body_too_large` | `413` | Body exceeds 64 KiB |
 | `unsupported_media_type` | `415` | `Content-Type` is not `application/json` |
 | `validation_failed` | `422` | One or more fields are invalid; see `errors` |
+| `maintainer_not_found` | `422` | Creating an Application whose `maintainerId` refers to no Maintainer |
+| `maintainer_changed` | `422` | Updating an Application with a different `maintainerId` |
 | `if_match_required` | `428` | `If-Match` is missing on PUT or DELETE |
 | `internal_error` | `500` | Unexpected server error; details are only logged |
 | `unavailable` | `503` | Database busy, request deadline exceeded, or request canceled by the client |
 | `not_ready` | `503` | `/readyz`: shutting down or database unreachable |
 
-`errors` is present only on `validation_failed`, listing every invalid field.
-Codes for the Application endpoints (missing or changed Maintainer) are added
-with those endpoints.
+`errors` lists the invalid fields on every `422`: all of them for
+`validation_failed`, and `maintainerId` for `maintainer_not_found` and
+`maintainer_changed`. These two are separate codes because they depend on
+stored data (§4.2 step 6), not on the request alone.
 
 ### 4.4 Optimistic concurrency headers
 
@@ -320,6 +323,10 @@ generic HTTP clients relying on `If-Match: *` are not supported.
   and a parameter given twice, return `400`; they are not silently clamped.
   Unknown query parameters are ignored; a malformed query string (a bad
   `%` escape, a `;` separator) is `400`.
+- `GET /api/v1/applications` also takes `maintainerId` as a filter: given at
+  most once and not empty after trimming (like the `maintainerId` field),
+  otherwise `400`. A Maintainer that does not exist has no Applications, so
+  the result is an empty page, not `404`.
 - Results are ordered by `(created_at, id)` so pages are stable.
 - The server fetches `limit + 1` rows to compute `hasMore` without a `COUNT(*)`.
 

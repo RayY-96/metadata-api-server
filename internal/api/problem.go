@@ -25,6 +25,8 @@ const (
 	codeBodyTooLarge         = "body_too_large"
 	codeUnsupportedMediaType = "unsupported_media_type"
 	codeValidationFailed     = "validation_failed"
+	codeMaintainerNotFound   = "maintainer_not_found"
+	codeMaintainerChanged    = "maintainer_changed"
 	codeIfMatchRequired      = "if_match_required"
 	codeInternal             = "internal_error"
 	codeNotReady             = "not_ready"
@@ -50,7 +52,12 @@ func writeProblem(w http.ResponseWriter, status int, code, detail string) {
 
 // writeValidationProblem writes a 422 listing every invalid field.
 func writeValidationProblem(w http.ResponseWriter, errs []validation.FieldError) {
-	p := newProblem(http.StatusUnprocessableEntity, codeValidationFailed, "request body failed validation")
+	writeFieldProblem(w, codeValidationFailed, "request body failed validation", errs...)
+}
+
+// writeFieldProblem writes a 422 with the given code and per-field errors.
+func writeFieldProblem(w http.ResponseWriter, code, detail string, errs ...validation.FieldError) {
+	p := newProblem(http.StatusUnprocessableEntity, code, detail)
 	p.Errors = errs
 	writeProblemBody(w, p)
 }
@@ -81,6 +88,12 @@ func writeStoreError(w http.ResponseWriter, r *http.Request, err error) {
 	case errors.Is(err, store.ErrMaintainerInUse):
 		writeProblem(w, http.StatusConflict, codeMaintainerInUse,
 			"maintainer still owns applications; delete them first")
+	case errors.Is(err, store.ErrMaintainerNotFound):
+		writeFieldProblem(w, codeMaintainerNotFound, "the referenced maintainer does not exist",
+			validation.FieldError{Field: "maintainerId", Message: "must refer to an existing maintainer"})
+	case errors.Is(err, store.ErrMaintainerChanged):
+		writeFieldProblem(w, codeMaintainerChanged, "an application's maintainer cannot be changed",
+			validation.FieldError{Field: "maintainerId", Message: "must be omitted or equal the current value"})
 	case errors.Is(err, context.Canceled):
 		// A client cancellation, not a server error. The response is still
 		// written: the client may still be reading (DESIGN.md D9).

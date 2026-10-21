@@ -425,7 +425,8 @@ func TestDeleteMaintainerOrder(t *testing.T) {
 }
 
 // DESIGN.md A3: a Maintainer who still owns Applications cannot be deleted.
-// The Application is created through the store, as its endpoints come later.
+// The Application is created through the store, so that this test depends
+// only on the Maintainer endpoints.
 func TestDeleteMaintainerInUse(t *testing.T) {
 	st := openStore(t)
 	h := NewServer(st).Handler()
